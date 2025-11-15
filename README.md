@@ -45,6 +45,7 @@ This script is designed to solve a specific problem: creating a lead sheet when 
 ## Usage
 
 Run the main script from your terminal, providing the paths to the two input MIDI files and the desired output path.
+Provide the paths to the two input MIDI files and the desired output path.
 
 ```bash
 # Example with placeholder files in the 'input' directory
