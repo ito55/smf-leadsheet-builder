@@ -13,7 +13,8 @@ This script is designed to solve a specific problem: creating a lead sheet when 
 ## Requirements
 
 -   Python 3.8+
--   `music21` library
+-   `music21`
+-   `mido`
 
 ## Installation
 
@@ -39,14 +40,14 @@ This script is designed to solve a specific problem: creating a lead sheet when 
 
 3.  **Install the required Python library:**
     ```bash
-    pip install music21
+    pip install -r requirements.txt
     ```
 
 ## Usage
 
-Run the main script from your terminal, providing the paths to the two input MIDI files and the desired output path.
-Provide the paths to the two input MIDI files and the desired output path.
+### Generating a Lead Sheet
 
+Run the main script from your terminal, providing the paths to the chord and melody MIDI files, and the desired output path.
 ```bash
 # Example with placeholder files in the 'input' directory
 python main.py --chord-file input/raw_example.mid --melody-file input/processed_example.mid --output output/lead_sheet.musicxml
