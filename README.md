@@ -34,8 +34,8 @@ This script is designed to solve a specific problem: creating a lead sheet when 
 Run the main script from your terminal, providing the paths to the two input MIDI files and the desired output path.
 
 ```bash
-# Example usage
-python main.py --chord-file raw.mid --melody-file processed.mid --output lead_sheet.musicxml
+# Example with placeholder files in the 'input' directory
+python main.py --chord-file input/raw_example.mid --melody-file input/processed_example.mid --output output/lead_sheet.musicxml
 ```
 
 -   `--chord-file`: The path to the original XF-formatted MIDI file containing the chord data.

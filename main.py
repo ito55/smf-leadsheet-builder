@@ -22,7 +22,7 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""
 Example:
-  python main.py --chord-file samples/raw_example.mid --melody-file samples/processed_example.mid --output output/lead_sheet.musicxml
+  python main.py --chord-file input/raw_example.mid --melody-file input/processed_example.mid --output output/lead_sheet.musicxml
 """
     )
 
