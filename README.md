@@ -23,8 +23,21 @@ This script is designed to solve a specific problem: creating a lead sheet when 
     cd smf-leadsheet-builder
     ```
 
-2.  **Install the required Python library:**
-    It's recommended to use a virtual environment.
+2.  **Set up a virtual environment (recommended):**
+    This creates an isolated environment for the project's dependencies.
+    
+    ```bash
+    # Create a virtual environment named 'venv'
+    python -m venv venv
+    
+    # Activate the virtual environment
+    # On Windows:
+    .\venv\Scripts\activate
+    # On macOS/Linux:
+    source venv/bin/activate
+    ```
+
+3.  **Install the required Python library:**
     ```bash
     pip install music21
     ```
