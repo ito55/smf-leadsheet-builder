@@ -6,8 +6,130 @@ import mido
 from music21 import stream, harmony, note, meter, key, instrument, converter
 
 # ==============================================================================
+# Constants
+# ==============================================================================
+
+# Based on the detailed Yamaha XF Chord Name specification for SysEx messages
+XF_ROOT_DISP = {0: "bbb", 1: "bb", 2: "b", 3: "", 4: "#", 5: "##", 6: "###"}
+XF_ROOT_NOTE = {1: "C", 2: "D", 3: "E", 4: "F", 5: "G", 6: "A", 7: "B"}
+XF_CHORD_TYPES = {
+    0x00: "",           # Maj
+    0x01: "6",          # Maj6
+    0x02: "maj7",       # Maj7
+    0x03: "maj7(#11)",  # Maj7(#11)
+    0x04: "add9",       # Maj(9)
+    0x05: "maj9",       # Maj7(9)
+    0x06: "6(9)",       # Maj6(9)
+    0x07: "aug",        # aug
+    0x08: "m",          # min
+    0x09: "m6",         # min6
+    0x0A: "m7",         # min7
+    0x0B: "m7b5",       # min7b5
+    0x0C: "m(add9)",    # min(9)
+    0x0D: "m9",         # min7(9)
+    0x0E: "m11",        # min7(11)
+    0x0F: "m(maj7)",    # minMaj7
+    0x10: "m(maj7,9)",  # minMaj7(9)
+    0x11: "dim",        # dim
+    0x12: "dim7",       # dim7
+    0x13: "7",          # 7th
+    0x14: "7sus4",      # 7sus4
+    0x15: "7b5",        # 7b5
+    0x16: "7(9)",       # 7(9)
+    0x17: "7(#11)",     # 7(#11)
+    0x18: "7(13)",      # 7(13)
+    0x19: "7(b9)",      # 7(b9)
+    0x1A: "7(b13)",     # 7(b13)
+    0x1B: "7(#9)",      # 7(#9)
+    0x1C: "maj7aug",    # Maj7aug
+    0x1D: "7aug",       # 7aug
+    0x1E: "1+8",        # 1+8
+    0x1F: "1+5",        # 1+5
+    0x20: "sus4",       # sus4
+    0x21: "1+2+5",      # 1+2+5
+    0x22: "N.C.",       # cc (No Chord)
+}
+
+# ==============================================================================
 # Builder Logic
 # ==============================================================================
+
+def _parse_xf_chord(chord_bytes: tuple[int, ...]) -> str | None:
+    """
+    Parses Yamaha XF chord bytes based on the detailed specification.
+    cr = Chord Root, ct = Chord Type, bn = Bass Note
+    """
+    if not (2 <= len(chord_bytes) <= 4):
+        return None
+
+    cr, ct = chord_bytes[0], chord_bytes[1]
+    bn = chord_bytes[2] if len(chord_bytes) >= 3 else 127
+
+    # --- Chord Type (ct) ---
+    type_str = XF_CHORD_TYPES.get(ct)
+    if type_str is None:
+        return None
+    if type_str == "N.C.":
+        return "N.C."
+
+    # --- Chord Root (cr) and Bass Note (bn) ---
+    def parse_note_byte(note_byte: int) -> str | None:
+        if note_byte == 127:
+            return None
+        fff = (note_byte >> 4) & 0b0111  # Displacement
+        nnnn = note_byte & 0x0F          # Note
+
+        disp_str = XF_ROOT_DISP.get(fff)
+        note_str = XF_ROOT_NOTE.get(nnnn)
+
+        if disp_str is None or note_str is None:
+            return None # Invalid note byte
+        return f"{note_str}{disp_str}"
+
+    root_str = parse_note_byte(cr)
+    if root_str is None:
+        return None
+
+    bass_str = parse_note_byte(bn)
+
+    # --- Combine and return ---
+    chord_figure = f"{root_str}{type_str}"
+    if bass_str and root_str != bass_str:
+        chord_figure += f"/{bass_str}"
+
+    return chord_figure
+
+def _normalize_chord_figure(figure: str) -> str:
+    """
+    Normalizes a chord figure string to be compatible with music21.
+    - Replaces 'b' with '-' for flats.
+    - Maps common alternative chord names (e.g., 'add9' -> 'add2', 'm7(11)' -> 'm11').
+    - Simplifies common enharmonic spellings (e.g., 'E#' -> 'F', 'Gbb' -> 'F').
+    """
+    if not figure or figure == "N.C.":
+        return figure
+
+    # --- 1. Simplify Enharmonic Note Names ---
+    # This regex finds note names (A-G with sharps/flats) that are not part of a chord type (like 'm7b5').
+    # It correctly handles root notes and bass notes in slash chords.
+    def simplify_enharmonics(match):
+        note_name = match.group(0)
+        enharmonic_map = {
+            "E#": "F", "B#": "C",
+            "Fb": "E", "Cb": "B",
+            "Dbb": "C", "Ebb": "D", "Gbb": "F", "Abb": "G", "Bbb": "A"
+        }
+        return enharmonic_map.get(note_name, note_name)
+
+    figure = re.sub(r'\b[A-G](?:bb|##|b|#)\b', simplify_enharmonics, figure)
+
+    # --- 2. Normalize Chord Types and Flat Symbols ---
+    figure = figure.replace("add9", "add2")
+    figure = figure.replace("m7(11)", "m11")
+    figure = figure.replace("m(maj7,9)", "m(maj9)")
+
+    # music21 uses '-' for flat and '--' for double-flat.
+    return figure.replace("bb", "--").replace("b", "-")
 
 def _parse_chords_from_midi(midi_path: Path, ticks_per_quarter: int, debug_mode: bool = False) -> list[harmony.ChordSymbol]:
     """
@@ -17,35 +139,14 @@ def _parse_chords_from_midi(midi_path: Path, ticks_per_quarter: int, debug_mode:
     2. Standard text, lyric, or marker meta-messages.
     """
     chords = []
+    debug_log_buffer = []
+    debug_chord_figures = []
 
     # --- Method 1: Yamaha XF Meta Event Parsing Data ---
-    # Based on XF Specification Document (xfspc.pdf)
     XF_META_HEADER = (0x43, 0x7B)
     XF_CHORD_ID = 0x01
     XF_LYRIC_ID = 0x20
     XF_RUBY_ID = 0x21
-
-    # Chord Name (ID: 01H) Mappings, based on reverse-engineering the debug output.
-    # The key is a tuple of two bytes representing the chord.
-    xf_chord_map = {
-        (0x31, 0x22): "C#m7", (0x26, 0x02): "Fm7", (0x27, 0x13): "F#add9",
-        (0x35, 0x0A): "G#7#9", (0x31, 0x08): "C#sus4", (0x35, 0x13): "G#add9",
-        (0x23, 0x13): "D#add9", (0x23, 0x00): "D#", (0x27, 0x00): "F#",
-        (0x23, 0x13, 0x27): "D#add9/F#", (0x23, 0x00, 0x35): "D#/G#",
-        (0x27, 0x0A): "F#7#9", (0x26, 0x00): "Fm", (0x35, 0x13, 0x37): "G#add9/A#",
-        (0x31, 0x0A): "C#7#9", (0x27, 0x0A, 0x22): "F#7#9/C#", (0x35, 0x00): "G#",
-        (0x35, 0x00, 0x37): "G#/A#", (0x27, 0x08): "F#sus4",
-        (0x35, 0x02): "G#m7", (0x36, 0x13): "Aadd9", (0x44, 0x0A): "E7#9",
-        (0x37, 0x08): "A#sus4", (0x32, 0x13, 0x31): "Dm7/C#", (0x32, 0x00): "D",
-        (0x45, 0x00): "F", (0x36, 0x00): "A", (0x27, 0x02): "F#m7",
-        (0x34, 0x00, 0x23): "Fm/D#", (0x34, 0x00): "Fm", (0x31, 0x00): "C#",
-        (0x36, 0x13, 0x41): "Aadd9/C#", (0x34, 0x13, 0x23): "Fmadd9/D#",
-        # Add new chords found in the latest debug output
-        (0x23, 0x13, 0x22): "D#add9/C#", (0x23, 0x00, 0x27): "D#/F#",
-        (0x44, 0x13): "Eadd9", (0x32, 0x08): "Dsus4", (0x31, 0x13): "C#add9",
-        (0x36, 0x0A): "A7#9", (0x32, 0x0A): "D7#9",
-        (0x52, 0, 35): "Fm/D#", (0x52, 19, 35): "Fmadd9/D#"
-    }
 
     try:
         mf = mido.MidiFile(str(midi_path))
@@ -71,7 +172,7 @@ def _parse_chords_from_midi(midi_path: Path, ticks_per_quarter: int, debug_mode:
 
             if debug_mode:
                 data_hex = ' '.join(f'{b:02X}' for b in data)
-                print(f"  - DEBUG [TICK {absolute_time_ticks}]: Found XF Meta Event. ID: {event_id:02X}, Len: {len(data)}, Data: {data_hex}")
+                debug_log_buffer.append(f"  - DEBUG [TICK {absolute_time_ticks}]: Found XF Meta Event. ID: {event_id:02X}, Len: {len(data)}, Data: {data_hex}")
 
             if event_id == XF_CHORD_ID:
                 # The actual data payload starts after the header and ID
@@ -82,11 +183,18 @@ def _parse_chords_from_midi(midi_path: Path, ticks_per_quarter: int, debug_mode:
                 if not chord_bytes:
                     continue
 
-                # Look up the byte sequence in our new map
-                current_chord_text = xf_chord_map.get(chord_bytes)
+                # Parse the byte sequence according to the XF specification.
+                current_chord_text = _parse_xf_chord(chord_bytes)
 
-                if debug_mode and current_chord_text:
-                    print(f"    - Parsed chord bytes {chord_bytes} as '{current_chord_text}'")
+                if debug_mode:
+                    if not current_chord_text:
+                        debug_log_buffer.append(f"    - Unrecognized chord bytes: {chord_bytes}")
+                        continue # Skip to next message if chord is not recognized
+
+                    payload_hex = ' '.join(f'{b:02X}' for b in chord_bytes)
+                    debug_line = f"FF 7F 07 43 7B 01 {payload_hex} | {current_chord_text}"
+                    debug_chord_figures.append(debug_line)
+                    debug_log_buffer.append(f"    - Parsed chord bytes {chord_bytes} as '{current_chord_text}'")
 
         # --- Method 2: Check for standard Text/Lyric/Marker Meta-Events ---
         elif msg.is_meta and msg.type in ['text', 'lyrics', 'marker']:
@@ -98,7 +206,7 @@ def _parse_chords_from_midi(midi_path: Path, ticks_per_quarter: int, debug_mode:
             text = text.strip()
 
             if debug_mode and text:
-                print(f"  - DEBUG [TICK {absolute_time_ticks}]: Found text in '{msg.type}': '{text}'")
+                debug_log_buffer.append(f"  - DEBUG [TICK {absolute_time_ticks}]: Found text in '{msg.type}': '{text}'")
 
             if text:
                 # Expanded regex to find chord-like strings.
@@ -113,22 +221,43 @@ def _parse_chords_from_midi(midi_path: Path, ticks_per_quarter: int, debug_mode:
                         # Validate that music21 can understand this chord text
                         harmony.ChordSymbol(parsed_text)
                         current_chord_text = parsed_text
+                        if debug_mode:
+                            debug_chord_figures.append(f"TEXT,N/A,N/A,{current_chord_text}")
                     except Exception:
                         if debug_mode:
-                            print(f"  - DEBUG: Text '{parsed_text}' looked like a chord but failed to parse.")
+                            debug_log_buffer.append(f"    - DEBUG: Text '{parsed_text}' looked like a chord but failed to parse.")
                         pass # Not a valid chord symbol, ignore.
 
         # --- If a chord was found, create the music21 ChordSymbol object ---
         if current_chord_text:
             try:
-                cs = harmony.ChordSymbol(current_chord_text)
-                # Set the position in quarter notes
-                cs.offset = absolute_time_ticks / ticks_per_quarter
-                chords.append(cs)
+                if current_chord_text == "N.C.":
+                    # music21 has a specific object for "No Chord"
+                    cs = harmony.NoChord()
+                else:
+                    # Normalize the chord text for music21 compatibility (e.g., 'Gb' -> 'G-')
+                    normalized_text = _normalize_chord_figure(current_chord_text)
+                    cs = harmony.ChordSymbol(normalized_text)
+
+                if cs:
+                    # Set the position in quarter notes
+                    cs.offset = absolute_time_ticks / ticks_per_quarter
+                    chords.append(cs)
             except Exception as e:
                 print(f"Warning: Could not create chord from text '{current_chord_text}'. Details: {e}", file=sys.stderr)
 
-    print(f"  - Scanned MIDI data and found {len(chords)} chord symbols.")
+    # --- Final output based on findings ---
+    if debug_mode:
+        if chords:
+            print("  --- Found Chords ---")
+            for line in debug_chord_figures[:8]:
+                print(f"  {line}")
+        else:
+            print("  --- Detailed Scan Log (No Chords Found) ---")
+            for log_entry in debug_log_buffer:
+                print(log_entry)
+    else:
+        print(f"  - Scanned MIDI data and found {len(chords)} chord symbols.")
     return chords
 
 def create_lead_sheet(chord_midi_path: Path, melody_midi_path: Path, output_xml_path: Path):
