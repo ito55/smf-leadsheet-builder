@@ -1,0 +1,2 @@
+# Main dependency for music processing
+music21
