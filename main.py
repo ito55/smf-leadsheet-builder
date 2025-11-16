@@ -4,7 +4,7 @@ from pathlib import Path
 import re
 import mido
 from music21 import stream, harmony, note, meter, key, instrument, converter
-
+from music21 import metadata
 # ==============================================================================
 # Constants
 # ==============================================================================
@@ -54,51 +54,6 @@ XF_CHORD_TYPES = {
 # Builder Logic
 # ==============================================================================
 
-def _parse_xf_chord(chord_bytes: tuple[int, ...]) -> str | None:
-    """
-    Parses Yamaha XF chord bytes based on the detailed specification.
-    cr = Chord Root, ct = Chord Type, bn = Bass Note
-    """
-    if not (2 <= len(chord_bytes) <= 4):
-        return None
-
-    cr, ct = chord_bytes[0], chord_bytes[1]
-    bn = chord_bytes[2] if len(chord_bytes) >= 3 else 127
-
-    # --- Chord Type (ct) ---
-    type_str = XF_CHORD_TYPES.get(ct)
-    if type_str is None:
-        return None
-    if type_str == "N.C.":
-        return "N.C."
-
-    # --- Chord Root (cr) and Bass Note (bn) ---
-    def parse_note_byte(note_byte: int) -> str | None:
-        if note_byte == 127:
-            return None
-        fff = (note_byte >> 4) & 0b0111  # Displacement
-        nnnn = note_byte & 0x0F          # Note
-
-        disp_str = XF_ROOT_DISP.get(fff)
-        note_str = XF_ROOT_NOTE.get(nnnn)
-
-        if disp_str is None or note_str is None:
-            return None # Invalid note byte
-        return f"{note_str}{disp_str}"
-
-    root_str = parse_note_byte(cr)
-    if root_str is None:
-        return None
-
-    bass_str = parse_note_byte(bn)
-
-    # --- Combine and return ---
-    chord_figure = f"{root_str}{type_str}"
-    if bass_str and root_str != bass_str:
-        chord_figure += f"/{bass_str}"
-
-    return chord_figure
-
 def _normalize_chord_figure(figure: str) -> str:
     """
     Normalizes a chord figure string to be compatible with music21.
@@ -131,6 +86,18 @@ def _normalize_chord_figure(figure: str) -> str:
     # music21 uses '-' for flat and '--' for double-flat.
     return figure.replace("bb", "--").replace("b", "-")
 
+def _get_title_from_midi(mf: mido.MidiFile) -> str | None:
+    """
+    Attempts to find the song title from a mido MidiFile object.
+    It typically resides in the first 'track_name' meta message of the first track.
+    """
+    if not mf.tracks:
+        return None
+    for msg in mf.tracks[0]:
+        if msg.type == 'track_name':
+            return msg.name.strip()
+    return None
+
 def _parse_chords_from_midi(midi_path: Path, ticks_per_quarter: int, debug_mode: bool = False) -> list[harmony.ChordSymbol]:
     """
     Parses a MIDI file for chord symbols using the mido library.
@@ -140,13 +107,48 @@ def _parse_chords_from_midi(midi_path: Path, ticks_per_quarter: int, debug_mode:
     """
     chords = []
     debug_log_buffer = []
-    debug_chord_figures = []
 
-    # --- Method 1: Yamaha XF Meta Event Parsing Data ---
+    # --- XF Parsing Logic (kept local to this function) ---
     XF_META_HEADER = (0x43, 0x7B)
     XF_CHORD_ID = 0x01
-    XF_LYRIC_ID = 0x20
-    XF_RUBY_ID = 0x21
+
+    def _parse_xf_chord_sysex(chord_bytes: tuple[int, ...]) -> str | None:
+        if not (2 <= len(chord_bytes) <= 4):
+            return None
+
+        cr, ct = chord_bytes[0], chord_bytes[1]
+        bn = chord_bytes[2] if len(chord_bytes) >= 3 else 127
+
+        type_str = XF_CHORD_TYPES.get(ct)
+        if type_str is None:
+            return None
+        if type_str == "N.C.":
+            return "N.C."
+
+        def parse_note_byte(note_byte: int) -> str | None:
+            if note_byte == 127:
+                return None
+            fff = (note_byte >> 4) & 0b0111
+            nnnn = note_byte & 0x0F
+
+            disp_str = XF_ROOT_DISP.get(fff)
+            note_str = XF_ROOT_NOTE.get(nnnn)
+
+            if disp_str is None or note_str is None:
+                return None
+            return f"{note_str}{disp_str}"
+
+        root_str = parse_note_byte(cr)
+        if root_str is None:
+            return None
+
+        bass_str = parse_note_byte(bn)
+
+        chord_figure = f"{root_str}{type_str}"
+        if bass_str and root_str != bass_str:
+            chord_figure += f"/{bass_str}"
+
+        return chord_figure
 
     try:
         mf = mido.MidiFile(str(midi_path))
@@ -165,14 +167,13 @@ def _parse_chords_from_midi(midi_path: Path, ticks_per_quarter: int, debug_mode:
         absolute_time_ticks += msg.time
         current_chord_text = None
 
-        # --- Method 1: Check for Yamaha XF Meta Events ---
+        # --- Method 1: Yamaha XF SysEx Chord Events ---
         if msg.type == 'sequencer_specific' and len(msg.data) > 2 and msg.data[:2] == XF_META_HEADER:
             data = msg.data
             event_id = data[2]
 
             if debug_mode:
-                data_hex = ' '.join(f'{b:02X}' for b in data)
-                debug_log_buffer.append(f"  - DEBUG [TICK {absolute_time_ticks}]: Found XF Meta Event. ID: {event_id:02X}, Len: {len(data)}, Data: {data_hex}")
+                debug_log_buffer.append(f"  - DEBUG [TICK {absolute_time_ticks}]: Found XF SysEx Event (ID: {event_id:02X})")
 
             if event_id == XF_CHORD_ID:
                 # The actual data payload starts after the header and ID
@@ -184,19 +185,15 @@ def _parse_chords_from_midi(midi_path: Path, ticks_per_quarter: int, debug_mode:
                     continue
 
                 # Parse the byte sequence according to the XF specification.
-                current_chord_text = _parse_xf_chord(chord_bytes)
+                current_chord_text = _parse_xf_chord_sysex(chord_bytes)
 
                 if debug_mode:
                     if not current_chord_text:
-                        debug_log_buffer.append(f"    - Unrecognized chord bytes: {chord_bytes}")
-                        continue # Skip to next message if chord is not recognized
+                        debug_log_buffer.append(f"    - Failed to parse XF chord bytes: {chord_bytes}")
+                    else:
+                        debug_log_buffer.append(f"    - Parsed XF chord as '{current_chord_text}'")
 
-                    payload_hex = ' '.join(f'{b:02X}' for b in chord_bytes)
-                    debug_line = f"FF 7F 07 43 7B 01 {payload_hex} | {current_chord_text}"
-                    debug_chord_figures.append(debug_line)
-                    debug_log_buffer.append(f"    - Parsed chord bytes {chord_bytes} as '{current_chord_text}'")
-
-        # --- Method 2: Check for standard Text/Lyric/Marker Meta-Events ---
+        # --- Method 2: Standard Text/Lyric/Marker Meta-Events ---
         elif msg.is_meta and msg.type in ['text', 'lyrics', 'marker']:
             # The text attribute is 'name' for 'track_name' and 'text' for others.
             if msg.type == 'track_name':
@@ -221,8 +218,6 @@ def _parse_chords_from_midi(midi_path: Path, ticks_per_quarter: int, debug_mode:
                         # Validate that music21 can understand this chord text
                         harmony.ChordSymbol(parsed_text)
                         current_chord_text = parsed_text
-                        if debug_mode:
-                            debug_chord_figures.append(f"TEXT,N/A,N/A,{current_chord_text}")
                     except Exception:
                         if debug_mode:
                             debug_log_buffer.append(f"    - DEBUG: Text '{parsed_text}' looked like a chord but failed to parse.")
@@ -248,12 +243,9 @@ def _parse_chords_from_midi(midi_path: Path, ticks_per_quarter: int, debug_mode:
 
     # --- Final output based on findings ---
     if debug_mode:
-        if chords:
-            print("  --- Found Chords ---")
-            for line in debug_chord_figures[:8]:
-                print(f"  {line}")
-        else:
-            print("  --- Detailed Scan Log (No Chords Found) ---")
+        print("\n  --- Chord Parser Debug Log ---")
+        if not debug_log_buffer:
+            print("  (No relevant events found to log)")
             for log_entry in debug_log_buffer:
                 print(log_entry)
     else:
@@ -299,6 +291,7 @@ def create_lead_sheet(midi_path: Path, output_xml_path: Path):
     try:
         melody_mf = mido.MidiFile(str(midi_path))
         ticks_per_quarter = melody_mf.ticks_per_beat
+        title = _get_title_from_midi(melody_mf)
         # Use music21's converter for high-level musical structure
         melody_score = converter.parse(str(midi_path))
     except Exception as e:
@@ -322,6 +315,9 @@ def create_lead_sheet(midi_path: Path, output_xml_path: Path):
     # 5. Create the new lead sheet structure
     lead_sheet = stream.Score()
     output_part = stream.Part()
+    if title:
+        lead_sheet.metadata = metadata.Metadata()
+        lead_sheet.metadata.title = title
     output_part.id = 'lead_sheet_part'
 
     # Insert metadata

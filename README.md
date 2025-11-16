@@ -1,12 +1,12 @@
 # smf-leadsheet-builder
-A tool to generate a lead sheet (MusicXML) by merging chord data from an XF-formatted SMF and a melody from another SMF.
+A tool to generate a lead sheet (MusicXML) from a single XF-formatted Standard MIDI File (SMF).
 
-This script is designed to solve a specific problem: creating a lead sheet when the chord information and the final melody are in separate MIDI files. It extracts chord progressions from a raw XF-formatted Standard MIDI File and merges them with a cleaned-up melody track from a processed MIDI file, outputting a single MusicXML file ready for use in notation software like Dorico, Sibelius, or MuseScore.
+This script is designed to solve a specific problem: converting a Yamaha XF-formatted MIDI file, which contains embedded chord data, into a MusicXML lead sheet. It extracts both the chord progressions (from SysEx messages) and the melody (from Channel 1) from a single MIDI file, outputting a MusicXML file ready for use in notation software like Cubase, Dorico, or MuseScore. This streamlines the workflow by avoiding manual separation of melody and chord tracks.
 
 ## Features
 
--   **Chord Extraction**: Parses chord information from XF-formatted MIDI files.
--   **Melody Extraction**: Isolates the melody track from a standard MIDI file.
+-   **Chord Extraction**: Parses chord information from both Yamaha XF SysEx messages and standard text/lyric events.
+-   **Melody Extraction**: Isolates the melody track (assumed to be on MIDI Channel 1).
 -   **Merge Logic**: Intelligently combines chords and melody into a single musical structure.
 -   **MusicXML Output**: Generates a standard MusicXML file for easy import into notation software.
 
@@ -48,9 +48,9 @@ This script is designed to solve a specific problem: creating a lead sheet when 
 ### Generating a Lead Sheet
 
 Run the main script from your terminal, providing the paths to the chord and melody MIDI files, and the desired output path.
+
 ```bash
-# Example with placeholder files in the 'input' directory
-python main.py --chord-file input/raw_example.mid --melody-file input/processed_example.mid --output output/lead_sheet.musicxml
+python main.py --input input/your_song.mid --output output/your_song.musicxml
 ```
 
 -   `--chord-file`: The path to the original XF-formatted MIDI file containing the chord data.
